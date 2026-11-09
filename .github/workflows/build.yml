@@ -516,3 +516,29 @@ jobs:
                           }
                           "speak" -> {
                               speak(call.argument<String>
+                                    # 5. Build, upload, release
+      - name: Build release APK
+        run: |
+          set -eu
+          cd "$PROJECT_DIR"
+          flutter --version
+          flutter pub get
+          flutter build apk --release --no-tree-shake-icons
+          OUT="$PWD/build/app/outputs/flutter-apk"
+          cp "$OUT/app-release.apk" "$OUT/$APK_NAME"
+          ls -lh "$OUT"
+          echo "APK_PATH=$OUT/$APK_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-Gemini-Android-APK
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
+
+      - name: Publish APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.APP_VERSION }}-build.${{ github.run_number }}
+          name: "J.A.R.V.I.S. (Gemini Edition) v${{ env.APP_VERSION }} (#${{ github.run_number }})"
+          files: ${{ env.APK_PATH }}
