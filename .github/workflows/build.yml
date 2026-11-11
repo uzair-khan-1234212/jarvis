@@ -55,15 +55,25 @@ jobs:
           from pathlib import Path
           for gf in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
               p = Path(gf)
-              if p.exists():
-                  txt = p.read_text()
-                  txt = re.sub(r"minSdk\s*=\s*[^\n]+", "minSdk = 24", txt)
-                  txt = re.sub(r"minSdkVersion\s+[^\n]+", "minSdkVersion 24", txt)
-                  if gf.endswith(".kts"):
-                      txt = txt.replace("android {", "android {\n    lint { checkReleaseBuilds = false; abortOnError = false }")
-                  else:
-                      txt = txt.replace("android {", "android {\n    lintOptions { checkReleaseBuilds false; abortOnError false }")
-                  p.write_text(txt)
+              if not p.exists():
+                  continue
+              txt = p.read_text()
+              kts = gf.endswith(".kts")
+              txt = re.sub(r"minSdk\s*=\s*[^\n]+", "minSdk = 24", txt)
+              txt = re.sub(r"minSdkVersion\s+[^\n]+", "minSdkVersion 24", txt)
+              if kts:
+                  txt = txt.replace("android {", "android {\n    lint { checkReleaseBuilds = false; abortOnError = false }", 1)
+                  # Plugins like notifications/TTS need core library desugaring
+                  txt = txt.replace("compileOptions {", "compileOptions {\n        isCoreLibraryDesugaringEnabled = true", 1)
+                  # Avoid R8 "missing classes" failures in release builds
+                  txt = txt.replace("release {", "release {\n            isMinifyEnabled = false\n            isShrinkResources = false", 1)
+                  txt += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+              else:
+                  txt = txt.replace("android {", "android {\n    lintOptions { checkReleaseBuilds false; abortOnError false }", 1)
+                  txt = txt.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
+                  txt = txt.replace("release {", "release {\n            minifyEnabled false\n            shrinkResources false", 1)
+                  txt += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n"
+              p.write_text(txt)
           EOF
 
       - name: Build v2.0 Release APK
@@ -84,30 +94,3 @@ jobs:
           tag_name: v2.0.0-build.${{ github.run_number }}
           name: "J.A.R.V.I.S. v2.0 (Universal API + Danger Suite) (#${{ github.run_number }})"
           files: build/app/outputs/flutter-apk/Jarvis-v2.0-release.apk
-          
-                                    # 5. Build, upload, release
-      - name: Build release APK
-        run: |
-          set -eu
-          cd "$PROJECT_DIR"
-          flutter --version
-          flutter pub get
-          flutter build apk --release --no-tree-shake-icons
-          OUT="$PWD/build/app/outputs/flutter-apk"
-          cp "$OUT/app-release.apk" "$OUT/$APK_NAME"
-          ls -lh "$OUT"
-          echo "APK_PATH=$OUT/$APK_NAME" >> "$GITHUB_ENV"
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Jarvis-Gemini-Android-APK
-          path: ${{ env.APK_PATH }}
-          if-no-files-found: error
-
-      - name: Publish APK to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.APP_VERSION }}-build.${{ github.run_number }}
-          name: "J.A.R.V.I.S. (Gemini Edition) v${{ env.APP_VERSION }} (#${{ github.run_number }})"
-          files: ${{ env.APK_PATH }}
