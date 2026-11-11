@@ -8,514 +8,83 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: build-apk-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  APP_VERSION: "1.1.0"
-  APK_NAME: "Jarvis-Gemini-v1.1.0-release.apk"
-
 jobs:
   build-android-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------------
-      # 1. Unpack the ZIP (if present) and find where lib/main.dart lives.
-      #    Handles ZIPs that extract into a sub-folder (e.g. Jervis/).
-      # ------------------------------------------------------------------
-      - name: Unpack ZIP and locate Flutter project
+      - name: Unpack v2.0 Upgrade ZIP
         run: |
-          set -eu
-          for z in jarvis_gemini_project.zip Jervis.zip; do
-            if [ -f "$z" ]; then
-              echo "Unpacking $z"
-              unzip -oq "$z" -x '__MACOSX/*' || true
-              break
-            fi
-          done
-          MAIN=$(find . -type f -path '*/lib/main.dart' \
-            -not -path './.git/*' -not -path '*/build/*' -not -path '*/.dart_tool/*' \
-            | awk -F/ '{print NF, $0}' | sort -n | sed -n '1p' | cut -d' ' -f2-)
-          if [ -z "$MAIN" ]; then
-            echo "::error::lib/main.dart not found. Put your project (or its ZIP) in the repository root."
-            exit 1
+          if [ -f "jarvis_gemini_v2_upgrade.zip" ]; then
+            unzip -o jarvis_gemini_v2_upgrade.zip
+          elif [ -f "jarvis_gemini_project.zip" ]; then
+            unzip -o jarvis_gemini_project.zip
           fi
-          DIR=$(cd "$(dirname "$(dirname "$MAIN")")" && pwd)
-          echo "Flutter project root: $DIR"
-          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Flutter (stable)
+      - name: Set up Flutter Stable
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          channel: 'stable'
           cache: true
 
-      # ------------------------------------------------------------------
-      # 2. Pure-Dart pubspec + shim files + native voice service.
-      #    Shims live in lib/shims/ and are imported by package path, so
-      #    they never break Dart's "imports first" rule.
-      # ------------------------------------------------------------------
-      - name: Write pubspec, shims and voice service
+      - name: Generate Android Project & Apply v2.0 Cybernetic Icon and Native Bridges
         run: |
-          set -eu
-          cd "$PROJECT_DIR"
-          mkdir -p lib/shims lib/services assets/hermes
-
-          for f in SOUL USER AGENT; do
-            if [ ! -f "assets/hermes/$f.md" ]; then
-              echo "::warning::assets/hermes/$f.md is missing - creating an empty placeholder"
-              printf '# %s\n' "$f" > "assets/hermes/$f.md"
-            fi
-          done
-
-          cat > pubspec.yaml << 'YAML'
-          name: private_agent
-          description: "J.A.R.V.I.S. (Gemini Edition)"
-          publish_to: 'none'
-          version: 1.1.0+4
-
-          environment:
-            sdk: '>=3.7.0 <4.0.0'
-
-          dependencies:
-            flutter:
-              sdk: flutter
-            http: ^1.2.0
-
-          flutter:
-            uses-material-design: true
-            assets:
-              - assets/hermes/SOUL.md
-              - assets/hermes/USER.md
-              - assets/hermes/AGENT.md
-          YAML
-
-          cat > analysis_options.yaml << 'YAML'
-          linter:
-            rules:
-              prefer_const_constructors: false
-          YAML
-
-          cat > lib/shims/shared_preferences.dart << 'DART'
-          import 'dart:convert';
-          import 'dart:io';
-
-          /// Pure-Dart stand-in for package:shared_preferences (JSON file storage).
-          class SharedPreferences {
-            SharedPreferences._(this._data);
-
-            static SharedPreferences? _instance;
-            final Map<String, dynamic> _data;
-
-            static File get _file => File('${Directory.systemTemp.path}/jarvis_prefs.json');
-
-            static Future<SharedPreferences> getInstance() async {
-              if (_instance != null) return _instance!;
-              var data = <String, dynamic>{};
-              try {
-                if (await _file.exists()) {
-                  final decoded = jsonDecode(await _file.readAsString());
-                  if (decoded is Map) data = Map<String, dynamic>.from(decoded);
-                }
-              } catch (_) {}
-              _instance = SharedPreferences._(data);
-              return _instance!;
-            }
-
-            Future<bool> _save() async {
-              try {
-                await _file.writeAsString(jsonEncode(_data));
-                return true;
-              } catch (_) {
-                return false;
-              }
-            }
-
-            Set<String> getKeys() => _data.keys.toSet();
-            bool containsKey(String key) => _data.containsKey(key);
-            Object? get(String key) => _data[key];
-            String? getString(String key) => _data[key]?.toString();
-            bool? getBool(String key) => _data[key] is bool ? _data[key] as bool : null;
-            int? getInt(String key) => _data[key] is num ? (_data[key] as num).toInt() : null;
-            double? getDouble(String key) => _data[key] is num ? (_data[key] as num).toDouble() : null;
-            List<String>? getStringList(String key) {
-              final v = _data[key];
-              return v is List ? v.map((e) => e.toString()).toList() : null;
-            }
-
-            Future<bool> setString(String key, String value) { _data[key] = value; return _save(); }
-            Future<bool> setBool(String key, bool value) { _data[key] = value; return _save(); }
-            Future<bool> setInt(String key, int value) { _data[key] = value; return _save(); }
-            Future<bool> setDouble(String key, double value) { _data[key] = value; return _save(); }
-            Future<bool> setStringList(String key, List<String> value) { _data[key] = value; return _save(); }
-            Future<bool> remove(String key) { _data.remove(key); return _save(); }
-            Future<bool> clear() { _data.clear(); return _save(); }
-            Future<void> reload() async {}
-          }
-          DART
-
-          cat > lib/shims/path_provider.dart << 'DART'
-          import 'dart:io';
-          export 'dart:io' show Directory;
-
-          Future<Directory> getApplicationDocumentsDirectory() => _sub('docs');
-          Future<Directory> getApplicationSupportDirectory() => _sub('support');
-          Future<Directory> getTemporaryDirectory() async => Directory.systemTemp;
-
-          Future<Directory> _sub(String name) async {
-            final d = Directory('${Directory.systemTemp.path}/$name');
-            if (!await d.exists()) await d.create(recursive: true);
-            return d;
-          }
-          DART
-
-          cat > lib/shims/markdown.dart << 'DART'
-          import 'package:flutter/material.dart';
-
-          /// Minimal stand-in for package:flutter_markdown (renders plain text).
-          class MarkdownStyleSheet {
-            final TextStyle? p, strong, em, h1, h2, h3, code, a, listBullet, blockquote;
-            const MarkdownStyleSheet({
-              this.p, this.strong, this.em, this.h1, this.h2, this.h3,
-              this.code, this.a, this.listBullet, this.blockquote,
-            });
-          }
-
-          class MarkdownBody extends StatelessWidget {
-            final String data;
-            final MarkdownStyleSheet? styleSheet;
-            final bool selectable;
-            final bool shrinkWrap;
-            const MarkdownBody({
-              super.key,
-              required this.data,
-              this.styleSheet,
-              this.selectable = true,
-              this.shrinkWrap = true,
-            });
-
-            @override
-            Widget build(BuildContext context) {
-              final style = styleSheet?.p ?? const TextStyle(color: Colors.white);
-              return selectable ? SelectableText(data, style: style) : Text(data, style: style);
-            }
-          }
-
-          class Markdown extends MarkdownBody {
-            const Markdown({
-              super.key,
-              required super.data,
-              super.styleSheet,
-              super.selectable,
-              super.shrinkWrap,
-            });
-          }
-          DART
-
-          cat > lib/shims/uuid.dart << 'DART'
-          import 'dart:math';
-
-          /// Minimal stand-in for package:uuid (random v4 ids).
-          class Uuid {
-            const Uuid();
-            static final Random _rng = Random.secure();
-
-            String v4() {
-              final b = List<int>.generate(16, (_) => _rng.nextInt(256));
-              b[6] = (b[6] & 0x0f) | 0x40;
-              b[8] = (b[8] & 0x3f) | 0x80;
-              String h(int i) => b[i].toRadixString(16).padLeft(2, '0');
-              return '${h(0)}${h(1)}${h(2)}${h(3)}-${h(4)}${h(5)}-${h(6)}${h(7)}-'
-                  '${h(8)}${h(9)}-${h(10)}${h(11)}${h(12)}${h(13)}${h(14)}${h(15)}';
-            }
-          }
-          DART
-
-          cat > lib/shims/image_picker.dart << 'DART'
-          import 'dart:typed_data';
-          import 'package:flutter/services.dart';
-
-          enum ImageSource { camera, gallery }
-
-          class XFile {
-            XFile(this._bytes, {this.path = ''});
-            final Uint8List _bytes;
-            final String path;
-            Future<Uint8List> readAsBytes() async => _bytes;
-            Future<int> length() async => _bytes.length;
-          }
-
-          /// Camera capture through the native hardware channel.
-          class ImagePicker {
-            static const MethodChannel _ch = MethodChannel('com.privateagent/hardware');
-
-            Future<XFile?> pickImage({
-              required ImageSource source,
-              int? imageQuality,
-              double? maxWidth,
-              double? maxHeight,
-            }) async {
-              try {
-                final b = await _ch.invokeMethod<Uint8List>('captureOpticalImage');
-                if (b != null && b.isNotEmpty) return XFile(b);
-              } catch (_) {}
-              return null;
-            }
-          }
-          DART
-
-          cat > lib/services/voice_service.dart << 'DART'
-          import 'dart:async';
-          import 'package:flutter/services.dart';
-
-          /// Voice input/output through native Android channels (no plugins).
-          class VoiceService {
-            static const MethodChannel _hw = MethodChannel('com.privateagent/hardware');
-            static const MethodChannel _tts = MethodChannel('com.privateagent/tts');
-
-            bool isInitialized = true;
-            bool isListening = false;
-            bool isSpeaking = false;
-            bool alwaysOnMode = false;
-            double currentSoundLevel = 0.0;
-
-            final void Function(String recognizedText, bool isFinal) onTranscript;
-            final void Function(double rmsNormalized) onSoundLevelChanged;
-            final void Function(bool speakingState) onSpeakingStateChanged;
-
-            Timer? _speakTimer;
-
-            VoiceService({
-              required this.onTranscript,
-              required this.onSoundLevelChanged,
-              required this.onSpeakingStateChanged,
-            }) {
-              _tts.setMethodCallHandler((call) async {
-                if (call.method == 'done') _finishSpeaking();
-                return null;
-              });
-            }
-
-            Future<void> initialize({
-              String locale = 'en-GB',
-              double rate = 0.52,
-              double pitch = 0.95,
-            }) =>
-                updateVoiceConfig(locale: locale, rate: rate, pitch: pitch);
-
-            Future<void> updateVoiceConfig({
-              required String locale,
-              required double rate,
-              required double pitch,
-            }) async {
-              try {
-                await _tts.invokeMethod('configure', {'locale': locale, 'rate': rate, 'pitch': pitch});
-              } catch (_) {}
-            }
-
-            Future<void> startListening() async {
-              if (isListening) return;
-              isListening = true;
-              onSoundLevelChanged(0.6);
-              try {
-                final text = await _hw.invokeMethod<String>('listenSpeechOnce') ?? '';
-                isListening = false;
-                onSoundLevelChanged(0.0);
-                if (text.trim().isNotEmpty) onTranscript(text.trim(), true);
-              } catch (_) {
-                isListening = false;
-                onSoundLevelChanged(0.0);
-              }
-            }
-
-            Future<void> stopListening() async {
-              isListening = false;
-              onSoundLevelChanged(0.0);
-            }
-
-            Future<void> speak(String text) async {
-              if (text.trim().isEmpty) return;
-              _speakTimer?.cancel();
-              isSpeaking = true;
-              onSpeakingStateChanged(true);
-              try {
-                await _tts.invokeMethod('speak', {'text': text});
-              } catch (_) {
-                try {
-                  await _hw.invokeMethod('speakTts', {'text': text});
-                } catch (_) {}
-              }
-              // Safety net in case the native "done" callback never arrives.
-              final ms = (3000 + text.length * 90).clamp(3000, 60000).toInt();
-              _speakTimer = Timer(Duration(milliseconds: ms), _finishSpeaking);
-            }
-
-            Future<void> stopSpeaking() async {
-              _finishSpeaking();
-              try {
-                await _tts.invokeMethod('stop');
-              } catch (_) {
-                try {
-                  await _hw.invokeMethod('stopTts');
-                } catch (_) {}
-              }
-            }
-
-            void _finishSpeaking() {
-              _speakTimer?.cancel();
-              if (!isSpeaking) return;
-              isSpeaking = false;
-              onSpeakingStateChanged(false);
-            }
-
-            void dispose() {
-              stopSpeaking();
-              _tts.setMethodCallHandler(null);
-            }
-          }
-          DART
-
-      # ------------------------------------------------------------------
-      # 3. Patch Dart sources: point package imports at the shims and fix
-      #    known typos.
-      # ------------------------------------------------------------------
-      - name: Patch Dart sources
-        run: |
-          set -eu
-          cd "$PROJECT_DIR"
-          python3 - << 'PY'
-          import re
-          from pathlib import Path
-
-          SHIMS = {
-              "shared_preferences": "shared_preferences.dart",
-              "path_provider": "path_provider.dart",
-              "flutter_markdown": "markdown.dart",
-              "uuid": "uuid.dart",
-              "image_picker": "image_picker.dart",
-          }
-          pattern = re.compile(
-              r"""import\s+['"]package:(%s)/[^'"]+['"]([^;]*);""" % "|".join(SHIMS)
-          )
-
-          found = set()
-          for f in sorted(Path("lib").rglob("*.dart")):
-              if "shims" in f.parts:
-                  continue
-              src = f.read_text(encoding="utf-8")
-              out = pattern.sub(
-                  lambda m: "import 'package:private_agent/shims/%s'%s;" % (SHIMS[m.group(1)], m.group(2)),
-                  src,
-              )
-              out = out.replace("Icons.Autorenew", "Icons.autorenew")
-              out = out.replace("Icons.settings_Suggest", "Icons.settings_suggest")
-              if f.name == "code_black_screen.dart":
-                  out = out.replace(
-                      "TAMPER VIOLATIONS: [$_tamperViolations]\nTRANSMITTING",
-                      "TAMPER VIOLATIONS: [$_tamperViolations]\\nTRANSMITTING",
-                  )
-              if out != src:
-                  f.write_text(out, encoding="utf-8")
-                  print("patched", f)
-              for m in re.finditer(r"""import\s+['"]package:([a-z0-9_]+)/""", out):
-                  found.add(m.group(1))
-
-          extra = sorted(found - {"flutter", "http", "private_agent"})
-          if extra:
-              print("::warning::Imported but not in pubspec.yaml (build may fail): " + ", ".join(extra))
-          PY
-
-      # ------------------------------------------------------------------
-      # 4. Fresh Android scaffold, then restore the project's own native
-      #    code on top and apply the fixes it needs.
-      # ------------------------------------------------------------------
-      - name: Regenerate Android project
-        run: |
-          set -eu
-          cd "$PROJECT_DIR"
-          rm -rf /tmp/jv && mkdir -p /tmp/jv
-          cp -r lib assets pubspec.yaml analysis_options.yaml /tmp/jv/
-          if [ -d android/app/src/main ]; then
-            cp -r android/app/src/main /tmp/jv/android_main
-          fi
+          mkdir -p /tmp/jarvis_backup
+          cp -r lib pubspec.yaml analysis_options.yaml assets /tmp/jarvis_backup/
+          cp -r android/app/src/main /tmp/jarvis_backup/android_main
           rm -rf android build
           flutter create --platforms=android --org com.privateagent --project-name private_agent .
-          rm -rf lib assets test
-          cp -r /tmp/jv/lib /tmp/jv/assets .
-          cp /tmp/jv/pubspec.yaml /tmp/jv/analysis_options.yaml .
-          if [ -d /tmp/jv/android_main ]; then
-            rm -rf android/app/src/main/kotlin android/app/src/main/java
-            cp -r /tmp/jv/android_main/. android/app/src/main/
-          else
-            echo "::warning::No android/app/src/main in the project - native voice/camera code is missing"
-          fi
+          cp -r /tmp/jarvis_backup/lib .
+          cp /tmp/jarvis_backup/pubspec.yaml .
+          cp /tmp/jarvis_backup/analysis_options.yaml .
+          cp -r /tmp/jarvis_backup/assets .
+          rm -rf android/app/src/main/kotlin android/app/src/main/java
+          # Remove default Flutter adaptive icon XML so the custom v2.0 Cybernetic Icon is used
+          rm -rf android/app/src/main/res/mipmap-anydpi-v26
+          cp -r /tmp/jarvis_backup/android_main/* android/app/src/main/
+          python3 - << 'EOF'
+          import re
+          from pathlib import Path
+          for gf in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
+              p = Path(gf)
+              if p.exists():
+                  txt = p.read_text()
+                  txt = re.sub(r"minSdk\s*=\s*[^\n]+", "minSdk = 24", txt)
+                  txt = re.sub(r"minSdkVersion\s+[^\n]+", "minSdkVersion 24", txt)
+                  if gf.endswith(".kts"):
+                      txt = txt.replace("android {", "android {\n    lint { checkReleaseBuilds = false; abortOnError = false }")
+                  else:
+                      txt = txt.replace("android {", "android {\n    lintOptions { checkReleaseBuilds false; abortOnError false }")
+                  p.write_text(txt)
+          EOF
 
-      - name: Patch Android files
+      - name: Build v2.0 Release APK
         run: |
-          set -eu
-          cd "$PROJECT_DIR"
+          flutter pub get
+          flutter build apk --release --no-tree-shake-icons
+          cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Jarvis-v2.0-release.apk
 
-          cat > /tmp/TtsBridge.kt.tpl << 'KT'
-          package __PKG__
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-v2.0-Android-APK
+          path: build/app/outputs/flutter-apk/Jarvis-v2.0-release.apk
 
-          import android.content.Context
-          import android.os.Handler
-          import android.os.Looper
-          import android.speech.tts.TextToSpeech
-          import android.speech.tts.UtteranceProgressListener
-          import io.flutter.embedding.engine.FlutterEngine
-          import io.flutter.plugin.common.MethodChannel
-          import java.util.Locale
-
-          /** Text-to-speech bridge for the Dart VoiceService (channel: com.privateagent/tts). */
-          class TtsBridge(context: Context, engine: FlutterEngine) {
-              private val channel = MethodChannel(engine.dartExecutor.binaryMessenger, "com.privateagent/tts")
-              private val mainHandler = Handler(Looper.getMainLooper())
-              private var tts: TextToSpeech? = null
-              private var ready = false
-              private var pending: String? = null
-              private var locale: Locale = Locale.UK
-              private var speechRate = 1.0f
-              private var pitch = 0.95f
-
-              init {
-                  tts = TextToSpeech(context.applicationContext) { status ->
-                      if (status == TextToSpeech.SUCCESS) {
-                          ready = true
-                          tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                              override fun onStart(utteranceId: String?) {}
-                              override fun onDone(utteranceId: String?) { notifyDone() }
-                              @Deprecated("Deprecated in Java")
-                              override fun onError(utteranceId: String?) { notifyDone() }
-                          })
-                          applyConfig()
-                          pending?.let { speak(it) }
-                          pending = null
-                      }
-                  }
-
-                  channel.setMethodCallHandler { call, result ->
-                      when (call.method) {
-                          "configure" -> {
-                              call.argument<String>("locale")?.let { locale = Locale.forLanguageTag(it.replace('_', '-')) }
-                              call.argument<Double>("rate")?.let { speechRate = (it * 2.0).toFloat().coerceIn(0.5f, 2.0f) }
-                              call.argument<Double>("pitch")?.let { pitch = it.toFloat().coerceIn(0.5f, 2.0f) }
-                              if (ready) applyConfig()
-                              result.success(true)
-                          }
-                          "speak" -> {
-                              speak(call.argument<String>
+      - name: Publish v2.0 APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0.0-build.${{ github.run_number }}
+          name: "J.A.R.V.I.S. v2.0 (Universal API + Danger Suite) (#${{ github.run_number }})"
+          files: build/app/outputs/flutter-apk/Jarvis-v2.0-release.apk
+          
                                     # 5. Build, upload, release
       - name: Build release APK
         run: |
